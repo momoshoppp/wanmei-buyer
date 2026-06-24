@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- 版本標記：白標買家版 v1.0 -->
+    <title>查詢訂單</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400..900;1,400..900&family=DM+Serif+Display:ital@0;1&family=Cormorant+Garamond:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+    
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "firebase/app": "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js",
+        "firebase/firestore": "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js",
+        "lucide-react": "https://esm.sh/lucide-react@0.344.0?deps=react@18.2.0"
+      }
+    }
+    </script>
+    <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+    <style>
+        body { font-family: 'Noto Sans TC', sans-serif; -webkit-tap-highlight-color: transparent; background-color: #FAF7F2; color: #3A3A3A; }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .cursive-logo { 
+            font-family: 'Playfair Display', serif; 
+            font-style: italic;
+            font-weight: 900;
+            letter-spacing: 0.02em;
+        }
+        /* ✨ 精品感數字字體 ✨ */
+        .serif-number {
+            font-family: 'DM Serif Display', serif;
+            font-weight: 400;
+            letter-spacing: -0.02em;
+        }
+        .serif-number-small {
+            font-family: 'Cormorant Garamond', serif;
+            font-weight: 600;
+            letter-spacing: 0;
+        }
+        .animate-in { animation: fadeIn 0.4s ease-out forwards; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        /* Toast 訊息 */
+        .toast-wrap { transition: opacity 0.3s ease, transform 0.3s ease; }
+        .toast-show { opacity: 1; transform: translate(-50%, 0); }
+        .toast-hide { opacity: 0; transform: translate(-50%, -12px); pointer-events: none; }
+        /* LINE 按鈕漸層 */
+        .line-btn {
+            background: linear-gradient(135deg, #06C755, #00B348);
+            transition: all 0.2s ease;
+        }
+        .line-btn:active { transform: scale(0.96); }
+        /* 載入動畫 */
+        @keyframes pulse-soft {
+            0%, 100% { opacity: 0.3; }
+            50% { opacity: 0.7; }
+        }
+        .pulse-soft { animation: pulse-soft 1.4s ease-in-out infinite; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useMemo, useRef } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { initializeApp } from 'firebase/app';
+        import { getFirestore, collection, doc, onSnapshot, setDoc } from 'firebase/firestore';
+        import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+        import { Search, ChevronRight, MessageCircle, Truck, CheckCircle2, AlertTriangle, ExternalLink, Calendar, Loader2, Package, Gift, CreditCard, Copy, MapPin, User, Phone, Store, Save, ArrowLeft, ShoppingCart, Tag } from 'lucide-react';
+
+        // ═══════════════════════════════════════════════════════════════
+        // ⚙️ 買家端設定（出貨前由 Fann 填入）
+        // ═══════════════════════════════════════════════════════════════
+       const firebaseConfig = {
+  apiKey: "AIzaSyDANVBYhHxlG2lr8apSVFgi9TGVuX1vOQg",
+  authDomain: "wanmei-e4077.firebaseapp.com",
+  projectId: "wanmei-e4077",
+  storageBucket: "wanmei-e4077.firebasestorage.app",
+  messagingSenderId: "852508677938",
+  appId: "1:852508677938:web:173296cb601d84649d692b"
+};
+        const LINE_OA_ID = "請填入";
+        // ═══════════════════════════════════════════════════════════════
+
+        let app = null, auth = null, db = null, FIREBASE_OK = false;
+        try {
+            if (firebaseConfig.apiKey && !firebaseConfig.apiKey.includes('請填入')) {
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                FIREBASE_OK = true;
+            }
+        } catch (e) { console.error('Firebase init error:', e); }
+        const appId = 'shop-erp-v1';
+        const SHIPPING_FEE = 38;
+
+        // ─── 工具函式 ──────────────────────────────────────────────────
+        const formatDate = (dateObj) => {
+            if (!dateObj) return '';
+            const d = dateObj.seconds ? new Date(dateObj.seconds * 1000) : new Date(dateObj);
+            return `${d.getMonth() + 1}/${d.getDate()}`;
+        };
+
+        // ✅ Bug修復：與賣家端完全一致的計算邏輯
+        function getBundlePrice(qty, priceStr) {
+            if (!priceStr || qty <= 0) return 0;
+            const tiers = String(priceStr).split('/').map(s => Number(s.trim()));
+            if (tiers.length === 1) return (tiers[0] || 0) * qty;
+            let remainingQty = qty;
+            let total = 0;
+            for (let size = tiers.length; size >= 1; size--) {
+                const bundlePrice = tiers[size - 1];
+                if (bundlePrice > 0 && remainingQty >= size) {
+                    const count = Math.floor(remainingQty / size);
+                    total += count * bundlePrice;
+                    remainingQty %= size;
+                }
+            }
+            // fallback 到單價
+            if (remainingQty > 0 && tiers[0] > 0) total += remainingQty * tiers[0];
+            return total;
+        }
+
+        // ─── 主元件 ──────────────────────────────────────────────────
+        const App = () => {
+          const [user, setUser] = useState(null);
+          const [isLoggedIn, setIsLoggedIn] = useState(false);
+          const [searchName, setSearchName] = useState('');
+          const [orders, setOrders] = useState([]);
+          const [archivedOrders, setArchivedOrders] = useState([]); // ✅ 新增：歷史歸檔
+          const [storeConfig, setStoreConfig] = useState({ myshipUrl: '', freeShippingThreshold: 1500 });
+          const [storeCredits, setStoreCredits] = useState({}); // 購物金
+          const [priceBook, setPriceBook] = useState({}); // 品名用
+          const [promotion, setPromotion] = useState(null); // ✅ 促銷活動
+          const [dataLoaded, setDataLoaded] = useState(false);
+          const [toast, setToast] = useState({ show: false, msg: '', type: 'success' });
+          const toastTimer = useRef(null);
+          // ✅ 新增：寄件資訊
+          const [shippingProfile, setShippingProfile] = useState({ receiverName: '', phone: '', store: '' });
+          const [savingProfile, setSavingProfile] = useState(false);
+          const [showBankInfo, setShowBankInfo] = useState(false); // 控制匯款資訊摺疊
+          // ✅ 新增：付款流程頁面控制
+          const [currentPage, setCurrentPage] = useState('order'); // order / bank
+
+          // ✅ 取得商品品名（相容新舊格式，沒填返空字串）
+          const getProductName = (code) => {
+              const entry = priceBook[code];
+              if (entry == null || typeof entry !== 'object') return '';
+              return String(entry.name || '').trim();
+          };
+
+          // ✅ 促銷計算（與賣家端邏輯相同）
+          const isPromoActive = (promo) => {
+              if (!promo || !promo.enabled) return false;
+              const now = new Date();
+              if (promo.startAt && new Date(promo.startAt) > now) return false;
+              if (promo.endAt   && new Date(promo.endAt)   < now) return false;
+              return true;
+          };
+          // ✅ 白名單過濾：取得參與優惠的品項小計和數量
+          const getEligible = (promo, codeGroups) => {
+              let subtotal = 0; let qty = 0;
+              const useWL = promo.itemFilter === 'whitelist' && Array.isArray(promo.whitelist) && promo.whitelist.length > 0;
+              Object.entries(codeGroups).forEach(([code, cg]) => {
+                  if (useWL && !promo.whitelist.includes(code)) return;
+                  subtotal += (cg.subtotal || 0);
+                  qty += (cg.totalQty || 0);
+              });
+              return { subtotal, qty };
+          };
+          // ✅ 折扣計算（傳入 codeGroups，做白名單過濾）
+          const calcDiscount = (promo, codeGroups, locked = false) => {
+              if (!locked && !isPromoActive(promo)) return 0;
+              const { subtotal: eTotal, qty: eQty } = getEligible(promo, codeGroups);
+              if (eTotal === 0) return 0;
+              switch (promo.type) {
+                  case 'fixed':
+                      return Math.min((Number(promo.value) || 0) * eQty, eTotal);
+                  case 'percent': {
+                      const pct = Number(promo.percent) || 100;
+                      return Math.round(eTotal * (100 - pct) / 100);
+                  }
+                  case 'threshold':
+                      return eTotal >= (Number(promo.threshold) || 0)
+                          ? (Number(promo.thresholdDiscount) || 0) : 0;
+                  default: return 0;
+              }
+          };
+
+          const showMessage = (msg, type = 'success') => {
+              if (toastTimer.current) clearTimeout(toastTimer.current);
+              setToast({ show: true, msg, type });
+              toastTimer.current = setTimeout(() => setToast(t => ({ ...t, show: false })), 3000);
+          };
+
+          // Firebase 匿名登入
+          useEffect(() => {
+            signInAnonymously(auth).catch(err => console.error("Auth Error:", err));
+            const unsubscribe = onAuthStateChanged(auth, u => setUser(u));
+            return () => unsubscribe();
+          }, []);
+
+          // 雲端資料即時同步
+          useEffect(() => {
+            if (!user) return;
+            
+            const unsubOrders = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'orders'), snap => {
+                setOrders(snap.docs.map(d => ({ ...d.data(), id: d.id })));
+                setDataLoaded(true);
+            }, err => console.error("Orders sync error:", err));
+
+            const unsubStore = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'storeConfig'), d => {
+                if (d.exists()) setStoreConfig(d.data());
+            }, err => console.error("Config sync error:", err));
+
+            const unsubCredits = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'storeCredits'), snap => {
+                const map = {};
+                snap.docs.forEach(d => { map[d.id] = d.data(); });
+                setStoreCredits(map);
+            }, err => console.error("Credits sync error:", err));
+
+            // ✅ 新增：監聽價格庫（為了取得品名）
+            const unsubPrice = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'priceBook'), d => {
+                if (d.exists()) setPriceBook(d.data());
+            }, err => console.error("PriceBook sync error:", err));
+
+            // ✅ 新增：監聽促銷活動
+            const unsubPromo = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'promotion'), d => {
+                if (d.exists()) setPromotion(d.data());
+                else setPromotion(null);
+            }, err => console.error("Promo sync error:", err));
+
+            // ✅ 新增：監聽歸檔訂單（讓客人能查永久歷史）
+            const unsubArchived = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'archivedOrders'), snap => {
+                setArchivedOrders(snap.docs.map(d => ({ ...d.data(), id: d.id, _archived: true })));
+            }, err => console.error("Archived sync error:", err));
+
+            return () => { unsubOrders(); unsubStore(); unsubCredits(); unsubPrice(); unsubPromo(); unsubArchived(); };
+          }, [user]);
+
+          // ✅ 登入後載入該客人的寄件資訊
+          useEffect(() => {
+              if (!isLoggedIn || !searchName.trim() || !user) return;
+              const trimmedName = searchName.trim();
+              const unsub = onSnapshot(
+                  doc(db, 'artifacts', appId, 'public', 'data', 'customerProfiles', trimmedName),
+                  d => {
+                      if (d.exists()) {
+                          const data = d.data();
+                          setShippingProfile({
+                              receiverName: data.receiverName || '',
+                              phone: data.phone || '',
+                              store: data.store || ''
+                          });
+                      } else {
+                          setShippingProfile({ receiverName: '', phone: '', store: '' });
+                      }
+                  },
+                  err => console.error("Profile load error:", err)
+              );
+              return () => unsub();
+          }, [isLoggedIn, searchName, user]);
+
+          // ✅ 儲存寄件資訊
+          const saveShippingProfile = async () => {
+              const name = searchName.trim();
+              if (!name) return;
+              if (!shippingProfile.receiverName.trim() || !shippingProfile.phone.trim() || !shippingProfile.store.trim()) {
+                  showMessage("請填寫完整資訊", 'warn');
+                  return;
+              }
+              setSavingProfile(true);
+              try {
+                  await setDoc(
+                      doc(db, 'artifacts', appId, 'public', 'data', 'customerProfiles', name),
+                      {
+                          receiverName: shippingProfile.receiverName.trim(),
+                          phone: shippingProfile.phone.trim(),
+                          store: shippingProfile.store.trim(),
+                          updatedAt: new Date().toISOString()
+                      },
+                      { merge: true }
+                  );
+                  showMessage("寄件資訊已送出 ✅");
+              } catch (err) {
+                  console.error("Save profile error:", err);
+                  showMessage("儲存失敗，請稍後再試", 'error');
+              } finally {
+                  setSavingProfile(false);
+              }
+          };
+
+          // ✅ Bug修復：改善名字比對邏輯，trim + 忽略大小寫雙向比對
+          // ✅ 重構：myOrder 拆成「最新訂單」和「歷史訂單」
+          // 邏輯：把所有訂單（含歸檔）按「同日同人」分組
+          //       最新一組為主要顯示，其他組為歷史
+          const { currentOrder, pastOrders } = useMemo(() => {
+            if (!isLoggedIn || !searchName.trim()) return { currentOrder: null, pastOrders: [] };
+            const sn = searchName.trim().toLowerCase();
+            const allItems = [...orders, ...archivedOrders];
+            const myItems = allItems.filter(o => (o.customerName || '').trim().toLowerCase() === sn);
+            
+            if (myItems.length === 0) return { currentOrder: null, pastOrders: [] };
+
+            // 按「日期 (yyyy-mm-dd)」分組，每組就是一張訂單
+            const grouped = {};
+            myItems.forEach(o => {
+                if (!o.createdAt || !o.createdAt.seconds) return;
+                const d = new Date(o.createdAt.seconds * 1000);
+                const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                if (!grouped[dateKey]) {
+                    grouped[dateKey] = {
+                        name: o.customerName,
+                        codeGroups: {},
+                        itemTotal: 0,
+                        finalTotal: 0,
+                        status: 'pending',
+                        date: o.createdAt,
+                        creditApplied: 0,
+                        _archived: o._archived
+                    };
+                }
+                const group = grouped[dateKey];
+                if (!group.codeGroups[o.itemCode]) {
+                    group.codeGroups[o.itemCode] = { items: [], totalQty: 0, priceStr: o.price };
+                }
+                group.codeGroups[o.itemCode].items.push(o);
+                group.codeGroups[o.itemCode].totalQty += (Number(o.quantity) || 1);
+                if (o.status === 'shipped') group.status = 'shipped';
+                else if (o.status === 'completed' && group.status !== 'shipped') group.status = 'completed';
+                if (o.creditApplied && !group.creditApplied) {
+                    group.creditApplied = Number(o.creditApplied) || 0;
+                }
+                // ✅ 收集訂單上鎖住的促銷快照
+                if (o.promoSnapshot && !group.promoSnapshot) {
+                    group.promoSnapshot = o.promoSnapshot;
+                }
+            });
+
+            // 計算每組的小計
+            const threshold = storeConfig.freeShippingThreshold || 1500;
+            const allGroups = Object.values(grouped).map(g => {
+                let total = 0;
+                const totalQty = Object.values(g.codeGroups).reduce((s, cg) => s + cg.totalQty, 0);
+                Object.values(g.codeGroups).forEach(cg => { 
+                    cg.subtotal = getBundlePrice(cg.totalQty, cg.priceStr); 
+                    total += cg.subtotal; 
+                });
+                g.itemTotal = total;
+                g.hasShippingFee = g.itemTotal < threshold && g.itemTotal > 0;
+                const baseTotal = g.hasShippingFee ? g.itemTotal + SHIPPING_FEE : g.itemTotal;
+                // ✅ 促銷折扣（優先用訂單鎖住的快照，日期過了也不變）
+                let usedPromo = null;
+                let isLocked = false;
+                if (g.promoSnapshot && g.promoSnapshot.enabled) {
+                    usedPromo = g.promoSnapshot;
+                    isLocked = true;
+                } else if (promotion && promotion.enabled) {
+                    const orderTime = g.date?.seconds ? new Date(g.date.seconds * 1000) : new Date();
+                    if ((!promotion.startAt || new Date(promotion.startAt) <= orderTime) &&
+                        (!promotion.endAt   || new Date(promotion.endAt)   >= orderTime)) {
+                        usedPromo = promotion;
+                    }
+                }
+                g.promoDiscount = usedPromo ? calcDiscount(usedPromo, g.codeGroups, isLocked) : 0;
+                g.promoName = usedPromo ? (usedPromo.name || '促銷折扣') : '';
+                g.creditApplied = g.creditApplied || 0;
+                g.finalTotal = Math.max(0, baseTotal - g.promoDiscount - g.creditApplied);
+                g.creditBalance = storeCredits[g.name]?.balance || 0;
+                return g;
+            }).sort((a, b) => (b.date?.seconds || 0) - (a.date?.seconds || 0)); // 新到舊
+
+            return {
+                currentOrder: allGroups[0] || null,
+                pastOrders: allGroups.slice(1)
+            };
+          }, [isLoggedIn, orders, archivedOrders, searchName, storeConfig.freeShippingThreshold, storeCredits, promotion]);
+
+          // ✅ 為了相容舊代碼，保留 myOrder 變數
+          const myOrder = currentOrder;
+
+          // ✅ 回報官方賴功能（修正 LINE 連結格式）
+          const handleLineReport = () => {
+              if (!myOrder) return;
+              const itemList = Object.entries(myOrder.codeGroups)
+                  .map(([code, cg]) => `${code} x${cg.totalQty}`)
+                  .join('、');
+              const statusText = myOrder.status === 'shipped' ? '已寄出' : 
+                                 myOrder.status === 'completed' ? '已付款' : '已下單';
+              const msg = `Hi～我是 ${myOrder.name} 🙌\n已完成下單囉！\n\n品項：${itemList}\n金額：$${myOrder.finalTotal}`;
+              const encoded = encodeURIComponent(msg);
+              // ✅ 修正：LINE 官方帳號連結需加 @ 前綴
+              window.open(`https://line.me/R/oaMessage/@${LINE_OA_ID}/?${encoded}`, '_blank', 'noopener,noreferrer');
+              showMessage("已為您開啟 LINE ✨");
+          };
+
+          // ✅ Bug修復：安全開啟賣貨便網址（防止 javascript: / data: 等協議注入）
+          const handleGoToMyship = () => {
+              const url = (storeConfig.myshipUrl || '').trim();
+              if (!url) {
+                  showMessage("賣貨便網址尚未設定", 'warn');
+                  return;
+              }
+              // 驗證只允許 http/https 協議
+              if (!/^https?:\/\//i.test(url)) {
+                  showMessage("網址格式錯誤，請聯繫賣家", 'error');
+                  return;
+              }
+              window.open(url, '_blank', 'noopener,noreferrer');
+          };
+
+          // ✅ 狀態設定對照表（新增 shipped）
+          const statusConfig = {
+              pending: { label: '🛒 待結帳', bg: 'bg-[#E8DFD0]', text: 'text-[#B8A582]' },
+              completed: { label: '✅ 已付款', bg: 'bg-[#E8EBE0]', text: 'text-[#7A8A5A]' },
+              shipped: { label: '📦 已寄出', bg: 'bg-[#E8DFD0]', text: 'text-[#7A6855]' }
+          };
+
+          return (
+            <div className="min-h-screen flex flex-col font-sans select-none bg-[#FAF7F2] text-[#3A3A3A]">
+
+              {/* Toast */}
+              <div className={`toast-wrap fixed top-10 left-1/2 z-[100] px-5 py-3 rounded-full text-xs font-bold shadow-2xl flex items-center gap-2 pointer-events-none
+                  ${toast.type === 'error' ? 'bg-[#B55550]/90 text-white' : toast.type === 'warn' ? 'bg-[#C9B88A]/90 text-white' : 'bg-[#333]/90 text-white'}
+                  ${toast.show ? 'toast-show' : 'toast-hide'}`}>
+                <CheckCircle2 size={14} className="text-[#8A9A6A] shrink-0"/> {toast.msg}
+              </div>
+              
+              <header className="p-8 text-center w-full sticky top-0 z-20 bg-white/60 backdrop-blur-md pb-6 border-b border-white">
+                  <h1 className="text-4xl cursive-logo text-[#B8A582]">查詢訂單</h1>
+                  <p className="text-[10px] font-bold opacity-30 tracking-[0.4em] uppercase mt-2">Select Shop</p>
+              </header>
+
+              <main className="flex-1 p-6 max-w-md mx-auto w-full">
+                {!isLoggedIn ? (
+                  <div className="mt-10 space-y-10 animate-in">
+                    <div className="bg-white/80 rounded-[3rem] p-10 border border-white shadow-xl space-y-6">
+                        <div className="space-y-3">
+                          <h3 className="text-[11px] font-bold text-[#555555] uppercase tracking-widest flex items-center gap-2">
+                              <Search size={14}/> 查詢您的專屬訂單
+                          </h3>
+                          <div className="relative">
+                            <input 
+                              value={searchName} 
+                              onChange={e => setSearchName(e.target.value)} 
+                              onKeyDown={e => e.key === 'Enter' && searchName.trim() && setIsLoggedIn(true)} 
+                              placeholder="您的名稱..." 
+                              className="w-full py-5 px-6 bg-white rounded-full text-sm font-bold outline-none focus:ring-2 ring-[#EDE6DA] transition-all shadow-sm" 
+                            />
+                            <button 
+                              onClick={() => { if (searchName.trim()) setIsLoggedIn(true); }} 
+                              className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-[#333] text-white rounded-full flex items-center justify-center active:scale-90 transition-transform shadow-md"
+                            >
+                              <ChevronRight size={20}/>
+                            </button>
+                          </div>
+                          <p className="text-[11px] mt-4 text-[#6B6B6B] font-bold tracking-wider pl-2">
+                            ※ 請輸入與社群相同的名稱
+                          </p>
+                        </div>
+                    </div>
+                    <button className="w-full py-5 bg-[#06C755] text-white rounded-full font-bold text-xs shadow-xl tracking-widest flex items-center justify-center gap-3 opacity-30 cursor-not-allowed">
+                      <MessageCircle size={20} fill="white"/> LINE 帳號查詢 (系統準備中)
+                    </button>
+                  </div>
+                ) : (
+                  <div className="w-full space-y-8 pt-4 animate-in">
+                    {/* 頭像區 */}
+                    <div className="flex items-center gap-4 pl-2">
+                        <div className="w-16 h-16 rounded-full border-4 border-white shadow-lg overflow-hidden bg-white">
+                          <img src={`https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(searchName)}`} alt="avatar" />
+                        </div>
+                        <div>
+                          <h3 className="text-xl font-black">Hi, {searchName}</h3>
+                          <button onClick={() => { setIsLoggedIn(false); setSearchName(''); setCurrentPage('order'); }} className="text-[10px] font-bold text-[#6B6B6B] uppercase tracking-widest mt-1 hover:text-[#3A3A3A] transition-colors">
+                              Logout / 登出返回
+                          </button>
+                        </div>
+                    </div>
+
+                    {/* ✅ Bug修復：判斷資料是否載入完成 */}
+                    {!dataLoaded ? (
+                        <div className="bg-white/60 p-16 rounded-[3rem] border border-white text-center">
+                            <Loader2 size={28} className="mx-auto mb-4 text-[#B8A582] animate-spin"/>
+                            <p className="text-xs font-bold text-[#555555] pulse-soft">正在讀取您的訂單...</p>
+                        </div>
+                    ) : myOrder ? (
+                      <div className="bg-white rounded-[3rem] p-8 shadow-2xl border border-white space-y-7 relative">
+
+                        {/* 日期標記 */}
+                        <div className="absolute top-8 right-8 flex items-center gap-1 text-[11px] font-black italic text-[#6B6B6B]">
+                           <Calendar size={11}/> {formatDate(myOrder.date)}
+                        </div>
+                        
+                        {/* 狀態顯示 - 已加入 shipped */}
+                        <div className="flex justify-between items-center pb-4 border-b border-[#EDE6DA]">
+                          <span className="text-[11px] font-bold text-[#555555] uppercase tracking-widest">目前狀態</span>
+                          <span className={`px-5 py-2 rounded-full text-[10px] font-black ${statusConfig[myOrder.status].bg} ${statusConfig[myOrder.status].text}`}>
+                            {statusConfig[myOrder.status].label}
+                          </span>
+                        </div>
+
+                        {/* 商品明細 */}
+                        <div className="space-y-5">
+                          {Object.entries(myOrder.codeGroups).map(([code, cg]) => {
+                            const productName = getProductName(code);
+                            return (
+                            <div key={code} className="border-b border-[#EDE6DA] pb-5 last:border-0 last:pb-0">
+                              <div className="flex justify-between items-start mb-2">
+                                <div className="flex-1 min-w-0">
+                                    <div className="font-bold text-[#3A3A3A] text-sm">
+                                        {code} <span className="serif-number-small text-sm text-[#6B6B6B] ml-1">×{cg.totalQty}</span>
+                                    </div>
+                                    {productName && (
+                                        <div className="text-[11px] text-[#888888] font-bold mt-1 tracking-wide">{productName}</div>
+                                    )}
+                                </div>
+                                <span className="serif-number text-xl text-[#B8A582] shrink-0 ml-2">${cg.subtotal.toLocaleString()}</span>
+                              </div>
+                              <div className="space-y-1.5 pl-3">
+                                {cg.items.map(i => (
+                                  <div key={i.id} className="flex justify-between text-[11px] text-[#555555]">
+                                    <span>- {i.spec || '單一'}</span>
+                                    <span className="serif-number-small text-sm text-[#6B6B6B]">×{i.quantity}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* ✅ 促銷 Badge（進行中才顯示） */}
+                        {myOrder.promoDiscount > 0 && (
+                            <div className="bg-gradient-to-r from-[#FFF3E0] to-[#FFF8EE] rounded-2xl p-4 border border-[#FFD580] flex items-center gap-3">
+                                <div className="w-9 h-9 rounded-full bg-[#E07B00] flex items-center justify-center shrink-0">
+                                    <Tag size={16} className="text-white"/>
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="font-black text-sm text-[#E07B00]">
+                                        {promotion?.name || '限時優惠'}
+                                    </div>
+                                    <div className="text-[10px] font-bold text-[#E07B00]/70 mt-0.5">
+                                        已為您自動套用優惠 🎉
+                                    </div>
+                                </div>
+                                <div className="text-right shrink-0">
+                                    <div className="serif-number text-xl text-[#E07B00] leading-none">
+                                        -${myOrder.promoDiscount.toLocaleString()}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 金額計算 */}
+                        <div className="pt-6 border-t border-[#EDE6DA] space-y-3">
+                            <div className="flex justify-between items-center">
+                                <span className="text-xs font-bold text-[#555555]">商品小計</span>
+                                <span className="serif-number text-lg text-[#3A3A3A]">${myOrder.itemTotal.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between items-center">
+                                <span className="text-xs font-bold text-[#555555]">運費</span>
+                                <span className={myOrder.hasShippingFee ? 'serif-number text-lg text-[#3A3A3A]' : 'text-xs font-bold text-[#6B7A4A]'}>
+                                    {myOrder.hasShippingFee ? `$${SHIPPING_FEE}` : '已達免運門檻 🎉'}
+                                </span>
+                            </div>
+                            {/* ✅ 促銷折扣行 */}
+                            {myOrder.promoDiscount > 0 && (
+                                <div className="flex justify-between items-center">
+                                    <span className="text-xs font-bold text-[#E07B00] flex items-center gap-1">
+                                        <Tag size={11}/> {promotion?.name || '限時優惠'}
+                                    </span>
+                                    <span className="serif-number text-lg text-[#E07B00]">-${myOrder.promoDiscount.toLocaleString()}</span>
+                                </div>
+                            )}
+                            {/* ✅ 購物金折抵顯示 */}
+                            {myOrder.creditApplied > 0 && (
+                                <div className="flex justify-between items-center">
+                                    <span className="text-xs font-bold text-[#B8A582] flex items-center gap-1">
+                                        <Gift size={11}/> 購物金折抵
+                                    </span>
+                                    <span className="serif-number text-lg text-[#B8A582]">-${myOrder.creditApplied.toLocaleString()}</span>
+                                </div>
+                            )}
+                            <div className="flex justify-between items-end pt-5 border-t border-dashed border-[#DDD2BE]">
+                              <span className="text-[11px] font-black text-[#6B6B6B] uppercase mb-2 tracking-[0.25em]">Total</span>
+                              <span className="serif-number text-6xl text-[#B8A582] leading-none">${myOrder.finalTotal.toLocaleString()}</span>
+                            </div>
+                        </div>
+
+                        {/* ✅ 購物金餘額卡片（若還有餘額） */}
+                        {myOrder.creditBalance > 0 && (
+                            <div className="bg-gradient-to-br from-[#F5F1EA] to-[#EDE6DA] rounded-2xl p-4 border border-[#DDD2BE] flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center border border-[#DDD2BE] shadow-sm">
+                                        <Gift size={16} className="text-[#B8A582]"/>
+                                    </div>
+                                    <div>
+                                        <div className="text-[10px] font-bold text-[#6B6B6B] uppercase tracking-wider">您的購物金</div>
+                                        <div className="text-[10px] text-[#888888] font-bold mt-0.5">下次消費可折抵</div>
+                                    </div>
+                                </div>
+                                <div className="serif-number text-3xl text-[#B8A582] leading-none">
+                                    ${myOrder.creditBalance.toLocaleString()}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* ✅ 已寄出狀態：特別提示 */}
+                        {myOrder.status === 'shipped' && (
+                            <div className="bg-[#E8DFD0] border border-[#D9CFC2] rounded-2xl p-4 flex items-start gap-2">
+                                <Package size={14} className="text-[#7A6855] mt-0.5 shrink-0"/>
+                                <p className="text-[11px] font-bold text-[#7A6855] leading-relaxed">
+                                    您的訂單已寄出！請留意取貨通知 📦 若有任何問題歡迎隨時聯絡我們～
+                                </p>
+                            </div>
+                        )}
+
+                        {/* ✅ 訂單頁 - 付款方式選擇（並排兩個按鈕，已寄出則不顯示） */}
+                        {currentPage === 'order' && myOrder.status !== 'shipped' && (
+                            <div className="space-y-4">
+                                {/* 標題 */}
+                                <div className="text-center">
+                                    <p className="text-[11px] font-black text-[#6B6B6B] uppercase tracking-[0.3em]">Payment Method</p>
+                                    <p className="text-[10px] text-[#888888] font-bold mt-1">請選擇付款方式</p>
+                                </div>
+
+                                {/* 並排兩個按鈕 */}
+                                <div className="grid grid-cols-2 gap-3">
+                                    {/* 賣貨便（淺燕麥色） */}
+                                    <button 
+                                        onClick={handleGoToMyship} 
+                                        className="aspect-square bg-[#D9C8A3] text-[#5F4A2B] rounded-[2rem] font-bold flex flex-col items-center justify-center gap-2 shadow-xl active:scale-95 transition-all p-4 border border-[#C9B88A]">
+                                        <ShoppingCart size={28}/>
+                                        <span className="text-xs tracking-widest">賣貨便</span>
+                                        <span className="text-[9px] opacity-70 font-normal">取貨付款</span>
+                                    </button>
+                                    {/* 銀行轉帳（深燕麥色） */}
+                                    <button 
+                                        onClick={() => setCurrentPage('bank')}
+                                        className="aspect-square bg-[#8A7864] text-white rounded-[2rem] font-bold flex flex-col items-center justify-center gap-2 shadow-xl active:scale-95 transition-all p-4">
+                                        <CreditCard size={28}/>
+                                        <span className="text-xs tracking-widest">銀行轉帳</span>
+                                        <span className="text-[9px] opacity-70 font-normal">匯款下單</span>
+                                    </button>
+                                </div>
+
+                                {/* 通知我已下單按鈕 */}
+                                <button
+                                    onClick={handleLineReport}
+                                    className="line-btn w-full py-3.5 text-white rounded-[2rem] font-bold text-xs tracking-widest shadow-lg flex items-center justify-center gap-2 mt-2">
+                                    <MessageCircle size={14}/> 通知我已下單
+                                </button>
+                            </div>
+                        )}
+
+                        {/* ✅ 銀行轉帳頁 - 匯款資訊 + 寄件資訊 */}
+                        {currentPage === 'bank' && (
+                            <div className="space-y-4 animate-in">
+                                {/* 返回按鈕 */}
+                                <button 
+                                    onClick={() => setCurrentPage('order')}
+                                    className="flex items-center gap-1.5 text-[11px] font-bold text-[#6B6B6B] hover:text-[#3A3A3A] transition-colors">
+                                    <ArrowLeft size={12}/> 返回訂單
+                                </button>
+
+                                {/* 匯款帳號卡 */}
+                                {(storeConfig.bankName || storeConfig.bankAccount) ? (
+                                    <div className="bg-white rounded-[2rem] p-6 shadow-sm border border-[#EDE6DA] space-y-4">
+                                        <div className="flex items-center gap-2">
+                                            <CreditCard size={16} className="text-[#B8A582]"/>
+                                            <span className="font-black text-sm text-[#3A3A3A]">銀行轉帳資訊</span>
+                                        </div>
+                                        <div className="space-y-3 pt-2 border-t border-[#EDE6DA]">
+                                            {storeConfig.bankName && (
+                                                <div className="flex justify-between items-center">
+                                                    <span className="text-[11px] font-bold text-[#6B6B6B]">銀行</span>
+                                                    <span className="text-sm font-black text-[#3A3A3A]">
+                                                        {storeConfig.bankName}
+                                                        {storeConfig.bankCode && (
+                                                            <span className="text-[#888888] ml-1">({storeConfig.bankCode})</span>
+                                                        )}
+                                                    </span>
+                                                </div>
+                                            )}
+                                            {storeConfig.bankAccount && (
+                                                <div className="flex justify-between items-center gap-2">
+                                                    <span className="text-[11px] font-bold text-[#6B6B6B] shrink-0">帳號</span>
+                                                    <div className="flex items-center gap-2 min-w-0">
+                                                        <span className="serif-number text-base text-[#B8A582] truncate">
+                                                            {storeConfig.bankAccount}
+                                                        </span>
+                                                        <button
+                                                            onClick={async () => {
+                                                                try {
+                                                                    await navigator.clipboard.writeText(storeConfig.bankAccount);
+                                                                    showMessage("帳號已複製 ✅");
+                                                                } catch { showMessage("複製失敗", 'error'); }
+                                                            }}
+                                                            className="text-[10px] font-bold text-[#B8A582] bg-[#F5F1EA] px-3 py-1.5 rounded-full flex items-center gap-1 hover:bg-[#EDE6DA] shrink-0">
+                                                            <Copy size={11}/> 複製
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {storeConfig.bankHolder && (
+                                                <div className="flex justify-between items-center">
+                                                    <span className="text-[11px] font-bold text-[#6B6B6B]">戶名</span>
+                                                    <span className="text-sm font-black text-[#3A3A3A]">{storeConfig.bankHolder}</span>
+                                                </div>
+                                            )}
+                                            <div className="bg-[#EDE2CC] rounded-xl px-3 py-2 border border-[#C9B88A] mt-2">
+                                                <p className="text-[10px] text-[#8A6D3B] font-bold leading-relaxed">
+                                                    💰 匯款金額：<span className="serif-number-small text-base">${myOrder.finalTotal.toLocaleString()}</span>
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="bg-[#EBD5D0] rounded-2xl px-4 py-3 border border-[#D9BDB5]">
+                                        <p className="text-[11px] font-bold text-[#A05550] leading-relaxed">
+                                            ⚠️ 賣家尚未設定匯款帳號，請改用賣貨便或直接聯絡賣家
+                                        </p>
+                                    </div>
+                                )}
+
+                                {/* 寄件資訊表單 */}
+                                <div className="bg-[#F5F1EA] rounded-[2rem] p-6 border border-[#EDE6DA] space-y-4">
+                                    <div className="flex items-center gap-2">
+                                        <MapPin size={16} className="text-[#B8A582]"/>
+                                        <span className="font-black text-sm text-[#3A3A3A]">寄件資訊</span>
+                                    </div>
+
+                                    <div className="space-y-2">
+                                        <div className="relative">
+                                            <User size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#888888]"/>
+                                            <input
+                                                type="text"
+                                                value={shippingProfile.receiverName}
+                                                onChange={e => setShippingProfile(p => ({ ...p, receiverName: e.target.value }))}
+                                                placeholder="收件人姓名"
+                                                className="w-full pl-9 pr-3 py-3 bg-white rounded-2xl text-xs font-bold outline-none border border-[#DDD2BE] focus:ring-2 ring-[#EDE6DA] transition-all"
+                                            />
+                                        </div>
+                                        <div className="relative">
+                                            <Phone size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#888888]"/>
+                                            <input
+                                                type="tel"
+                                                value={shippingProfile.phone}
+                                                onChange={e => setShippingProfile(p => ({ ...p, phone: e.target.value }))}
+                                                placeholder="聯絡電話"
+                                                className="w-full pl-9 pr-3 py-3 bg-white rounded-2xl text-xs font-bold outline-none border border-[#DDD2BE] focus:ring-2 ring-[#EDE6DA] transition-all"
+                                            />
+                                        </div>
+                                        <div className="relative">
+                                            <Store size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#888888]"/>
+                                            <input
+                                                type="text"
+                                                value={shippingProfile.store}
+                                                onChange={e => setShippingProfile(p => ({ ...p, store: e.target.value }))}
+                                                placeholder="7-11 取貨門市"
+                                                className="w-full pl-9 pr-3 py-3 bg-white rounded-2xl text-xs font-bold outline-none border border-[#DDD2BE] focus:ring-2 ring-[#EDE6DA] transition-all"
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div className="text-[10px] text-[#6B6B6B] font-bold leading-relaxed">
+                                        ✨ 資料會直接送到賣家後台<br/>
+                                        下次購買會自動帶入，不用重填
+                                    </div>
+                                </div>
+
+                                {/* 完成按鈕：儲存資料 + 通知賣家 */}
+                                <button
+                                    onClick={async () => {
+                                        // 1. 儲存寄件資訊
+                                        if (!shippingProfile.receiverName.trim() || !shippingProfile.phone.trim() || !shippingProfile.store.trim()) {
+                                            showMessage("請填寫完整寄件資訊", 'warn');
+                                            return;
+                                        }
+                                        setSavingProfile(true);
+                                        try {
+                                            await setDoc(
+                                                doc(db, 'artifacts', appId, 'public', 'data', 'customerProfiles', searchName.trim()),
+                                                {
+                                                    receiverName: shippingProfile.receiverName.trim(),
+                                                    phone: shippingProfile.phone.trim(),
+                                                    store: shippingProfile.store.trim(),
+                                                    updatedAt: new Date().toISOString()
+                                                },
+                                                { merge: true }
+                                            );
+                                            // 2. 直接觸發 LINE 通知（含完整資訊）
+                                            const itemList = Object.entries(myOrder.codeGroups)
+                                                .map(([code, cg]) => `${code} x${cg.totalQty}`)
+                                                .join('、');
+                                            const msg = `Hi～我是 ${myOrder.name} 🙌\n已匯款完成囉！\n\n品項：${itemList}\n金額：$${myOrder.finalTotal}\n\n📦 寄件資訊\n收件人：${shippingProfile.receiverName.trim()}\n電話：${shippingProfile.phone.trim()}\n門市：7-11 ${shippingProfile.store.trim()}`;
+                                            const encoded = encodeURIComponent(msg);
+                                            window.open(`https://line.me/R/oaMessage/@${LINE_OA_ID}/?${encoded}`, '_blank', 'noopener,noreferrer');
+                                            showMessage("已送出寄件資訊並通知賣家 ✅");
+                                        } catch (err) {
+                                            console.error("Save profile error:", err);
+                                            showMessage("儲存失敗，請稍後再試", 'error');
+                                        } finally {
+                                            setSavingProfile(false);
+                                        }
+                                    }}
+                                    disabled={savingProfile}
+                                    className="line-btn w-full py-4 text-white rounded-[2rem] font-bold text-xs tracking-widest shadow-lg flex items-center justify-center gap-2 disabled:opacity-60">
+                                    {savingProfile ? (
+                                        <><Loader2 size={14} className="animate-spin"/> 處理中...</>
+                                    ) : (
+                                        <><Save size={14}/> 完成匯款並通知賣家</>
+                                    )}
+                                </button>
+                            </div>
+                        )}
+
+                                                {/* 溫馨提示 - 只在訂單頁顯示 */}
+                        {currentPage === 'order' && (
+                            <div className="text-center">
+                                <p className="text-[11px] text-[#6B6B6B] font-bold leading-relaxed">
+                                    💡 下單後別忘了點「通知我已下單」<br/>方便我們為您安排出貨哦 ♡
+                                </p>
+                            </div>
+                        )}
+
+                        {/* ✅ 歷史訂單區（如果有過去訂單才顯示，只在訂單頁顯示） */}
+                        {currentPage === 'order' && pastOrders.length > 0 && (
+                            <details className="bg-white/60 rounded-[2rem] p-5 border border-white/80 mt-4">
+                                <summary className="cursor-pointer flex items-center justify-between font-black text-xs text-[#555555] uppercase tracking-widest">
+                                    <span className="flex items-center gap-2">
+                                        <Calendar size={14} className="text-[#B8A582]"/>
+                                        過去訂單 ({pastOrders.length} 筆)
+                                    </span>
+                                    <ChevronRight size={14} className="text-[#888888]"/>
+                                </summary>
+                                <div className="mt-4 space-y-3">
+                                    {pastOrders.map((po, idx) => {
+                                        const statusLabel = po.status === 'shipped' ? '已寄出' : po.status === 'completed' ? '已付款' : '待對帳';
+                                        const statusColor = po.status === 'shipped' ? 'text-[#7A6855]' : po.status === 'completed' ? 'text-[#6B7A4A]' : 'text-[#8A7864]';
+                                        return (
+                                            <div key={idx} className="bg-[#F5F1EA] rounded-2xl p-4 border border-[#EDE6DA]">
+                                                <div className="flex justify-between items-start mb-2">
+                                                    <div className="flex-1">
+                                                        <div className="text-[11px] font-bold text-[#6B6B6B] italic">
+                                                            <Calendar size={10} className="inline mr-1"/>
+                                                            {po.date && po.date.seconds ? 
+                                                                new Date(po.date.seconds * 1000).toLocaleDateString('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit' }) 
+                                                                : '?'
+                                                            }
+                                                        </div>
+                                                        <div className={`text-[10px] font-black ${statusColor} mt-0.5`}>
+                                                            {statusLabel}
+                                                        </div>
+                                                    </div>
+                                                    <div className="serif-number text-xl text-[#B8A582]">
+                                                        ${po.finalTotal.toLocaleString()}
+                                                    </div>
+                                                </div>
+                                                <div className="space-y-1 pt-2 border-t border-dashed border-[#DDD2BE]">
+                                                    {Object.entries(po.codeGroups).map(([code, cg]) => {
+                                                        const productName = getProductName(code);
+                                                        return (
+                                                            <div key={code} className="flex justify-between items-center text-[11px]">
+                                                                <span className="font-bold text-[#3A3A3A]">
+                                                                    {code}
+                                                                    {productName && <span className="text-[#888888] font-normal ml-1">· {productName}</span>}
+                                                                </span>
+                                                                <span className="text-[#6B6B6B] font-bold">×{cg.totalQty}</span>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                                <p className="text-[10px] text-[#888888] font-bold mt-3 text-center">
+                                    💎 感謝您持續支持 ♡
+                                </p>
+                            </details>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="bg-white/40 p-12 rounded-[3rem] border border-white border-dashed text-center space-y-3">
+                          <AlertTriangle size={24} className="mx-auto text-[#888888]"/>
+                          <p className="text-[#555555] font-bold text-sm">查無符合此暱稱的訂單</p>
+                          <p className="text-[11px] text-[#6B6B6B] font-bold">請確認名稱是否與社群一致</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </main>
+              <div className="fixed bottom-6 w-full text-center opacity-10 text-[9px] font-bold tracking-widest pointer-events-none text-[#3A3A3A]">v3.8.0 BUYER</div>
+            </div>
+          );
+        };
+
+        const NotReady = () => (
+            <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-[#FAF7F2]">
+                <div className="w-full max-w-xs text-center">
+                    <AlertTriangle size={32} className="mx-auto mb-4 text-[#B8A582]"/>
+                    <h1 className="text-xl font-black text-[#3A3A3A] mb-2">系統尚未設定</h1>
+                    <p className="text-[11px] text-[#6B6B6B] font-bold">請聯繫賣家協助設定</p>
+                </div>
+            </div>
+        );
+        const Root = () => (!FIREBASE_OK ? <NotReady/> : <App/>);
+        createRoot(document.getElementById('root')).render(<Root/>);
+    </script>
+</body>
+</html>
