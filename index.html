@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- 版本標記：白標買家版 v1.0 -->
+    <!-- 版本標記：白標買家版 v1.1.1 ( 運費動態 + 促銷鎖價修正 + LINE動態 + 品牌名 + 合併訂單支援 ) -->
     <title>查詢訂單</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
@@ -79,14 +79,14 @@
         // ═══════════════════════════════════════════════════════════════
         // ⚙️ 買家端設定（出貨前由 Fann 填入）
         // ═══════════════════════════════════════════════════════════════
-       const firebaseConfig = {
-  apiKey: "AIzaSyDANVBYhHxlG2lr8apSVFgi9TGVuX1vOQg",
-  authDomain: "wanmei-e4077.firebaseapp.com",
-  projectId: "wanmei-e4077",
-  storageBucket: "wanmei-e4077.firebasestorage.app",
-  messagingSenderId: "852508677938",
-  appId: "1:852508677938:web:173296cb601d84649d692b"
-};
+        const firebaseConfig = {
+          apiKey: "AIzaSyDANVBYhHxlG2lr8apSVFgi9TGVuX1vOQg",
+          authDomain: "wanmei-e4077.firebaseapp.com",
+          projectId: "wanmei-e4077",
+          storageBucket: "wanmei-e4077.firebasestorage.app",
+          messagingSenderId: "852508677938",
+          appId: "1:852508677938:web:173296cb601d84649d692b"
+        };
         const LINE_OA_ID = "請填入";
         // ═══════════════════════════════════════════════════════════════
 
@@ -136,7 +136,7 @@
           const [searchName, setSearchName] = useState('');
           const [orders, setOrders] = useState([]);
           const [archivedOrders, setArchivedOrders] = useState([]); // ✅ 新增：歷史歸檔
-          const [storeConfig, setStoreConfig] = useState({ myshipUrl: '', freeShippingThreshold: 1500 });
+          const [storeConfig, setStoreConfig] = useState({ myshipUrl: '', freeShippingThreshold: 1500, shippingFee: 38, lineOaId: '', brandName: '' });
           const [storeCredits, setStoreCredits] = useState({}); // 購物金
           const [priceBook, setPriceBook] = useState({}); // 品名用
           const [promotion, setPromotion] = useState(null); // ✅ 促銷活動
@@ -310,14 +310,20 @@
             
             if (myItems.length === 0) return { currentOrder: null, pastOrders: [] };
 
-            // 按「日期 (yyyy-mm-dd)」分組，每組就是一張訂單
+            // ✅ 支援合併訂單：有 mergeGroupId 的訂單歸同一組，否則按日期分組
             const grouped = {};
             myItems.forEach(o => {
                 if (!o.createdAt || !o.createdAt.seconds) return;
-                const d = new Date(o.createdAt.seconds * 1000);
-                const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-                if (!grouped[dateKey]) {
-                    grouped[dateKey] = {
+                let groupKey;
+                if (o.mergeGroupId) {
+                    groupKey = `merged__${o.mergeGroupId}`;
+                } else {
+                    const d = new Date(o.createdAt.seconds * 1000);
+                    const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                    groupKey = dateKey;
+                }
+                if (!grouped[groupKey]) {
+                    grouped[groupKey] = {
                         name: o.customerName,
                         codeGroups: {},
                         itemTotal: 0,
@@ -325,10 +331,16 @@
                         status: 'pending',
                         date: o.createdAt,
                         creditApplied: 0,
-                        _archived: o._archived
+                        _archived: o._archived,
+                        _isMerged: !!o.mergeGroupId,
+                        dates: []
                     };
                 }
-                const group = grouped[dateKey];
+                const group = grouped[groupKey];
+                // 收集日期範圍
+                const od = new Date(o.createdAt.seconds * 1000);
+                const odKey = `${od.getFullYear()}-${String(od.getMonth()+1).padStart(2,'0')}-${String(od.getDate()).padStart(2,'0')}`;
+                if (!group.dates.includes(odKey)) group.dates.push(odKey);
                 if (!group.codeGroups[o.itemCode]) {
                     group.codeGroups[o.itemCode] = { items: [], totalQty: 0, priceStr: o.price };
                 }
@@ -356,7 +368,9 @@
                 });
                 g.itemTotal = total;
                 g.hasShippingFee = g.itemTotal < threshold && g.itemTotal > 0;
-                const baseTotal = g.hasShippingFee ? g.itemTotal + SHIPPING_FEE : g.itemTotal;
+                const shippingFeeAmt = storeConfig.shippingFee ?? 38;
+                const baseTotal = g.hasShippingFee ? g.itemTotal + shippingFeeAmt : g.itemTotal;
+                g.shippingFeeAmt = shippingFeeAmt;
                 // ✅ 促銷折扣（優先用訂單鎖住的快照，日期過了也不變）
                 let usedPromo = null;
                 let isLocked = false;
@@ -368,6 +382,7 @@
                     if ((!promotion.startAt || new Date(promotion.startAt) <= orderTime) &&
                         (!promotion.endAt   || new Date(promotion.endAt)   >= orderTime)) {
                         usedPromo = promotion;
+                        isLocked = true; // ✅ v1.1 BUG FIX
                     }
                 }
                 g.promoDiscount = usedPromo ? calcDiscount(usedPromo, g.codeGroups, isLocked) : 0;
@@ -382,7 +397,7 @@
                 currentOrder: allGroups[0] || null,
                 pastOrders: allGroups.slice(1)
             };
-          }, [isLoggedIn, orders, archivedOrders, searchName, storeConfig.freeShippingThreshold, storeCredits, promotion]);
+          }, [isLoggedIn, orders, archivedOrders, searchName, storeConfig.freeShippingThreshold, storeConfig.shippingFee, storeCredits, promotion]);
 
           // ✅ 為了相容舊代碼，保留 myOrder 變數
           const myOrder = currentOrder;
@@ -390,6 +405,7 @@
           // ✅ 回報官方賴功能（修正 LINE 連結格式）
           const handleLineReport = () => {
               if (!myOrder) return;
+              const activeLineId = storeConfig.lineOaId || LINE_OA_ID;
               const itemList = Object.entries(myOrder.codeGroups)
                   .map(([code, cg]) => `${code} x${cg.totalQty}`)
                   .join('、');
@@ -397,8 +413,7 @@
                                  myOrder.status === 'completed' ? '已付款' : '已下單';
               const msg = `Hi～我是 ${myOrder.name} 🙌\n已完成下單囉！\n\n品項：${itemList}\n金額：$${myOrder.finalTotal}`;
               const encoded = encodeURIComponent(msg);
-              // ✅ 修正：LINE 官方帳號連結需加 @ 前綴
-              window.open(`https://line.me/R/oaMessage/@${LINE_OA_ID}/?${encoded}`, '_blank', 'noopener,noreferrer');
+              window.open(`https://line.me/R/oaMessage/@${activeLineId}/?${encoded}`, '_blank', 'noopener,noreferrer');
               showMessage("已為您開啟 LINE ✨");
           };
 
@@ -435,7 +450,7 @@
               </div>
               
               <header className="p-8 text-center w-full sticky top-0 z-20 bg-white/60 backdrop-blur-md pb-6 border-b border-white">
-                  <h1 className="text-4xl cursive-logo text-[#B8A582]">查詢訂單</h1>
+                  <h1 className="text-4xl cursive-logo text-[#B8A582]">{storeConfig.brandName || '查詢訂單'}</h1>
                   <p className="text-[10px] font-bold opacity-30 tracking-[0.4em] uppercase mt-2">Select Shop</p>
               </header>
 
@@ -467,9 +482,7 @@
                           </p>
                         </div>
                     </div>
-                    <button className="w-full py-5 bg-[#06C755] text-white rounded-full font-bold text-xs shadow-xl tracking-widest flex items-center justify-center gap-3 opacity-30 cursor-not-allowed">
-                      <MessageCircle size={20} fill="white"/> LINE 帳號查詢 (系統準備中)
-                    </button>
+
                   </div>
                 ) : (
                   <div className="w-full space-y-8 pt-4 animate-in">
@@ -495,9 +508,12 @@
                     ) : myOrder ? (
                       <div className="bg-white rounded-[3rem] p-8 shadow-2xl border border-white space-y-7 relative">
 
-                        {/* 日期標記 */}
+                        {/* 日期標記（合併訂單顯示範圍） */}
                         <div className="absolute top-8 right-8 flex items-center gap-1 text-[11px] font-black italic text-[#6B6B6B]">
-                           <Calendar size={11}/> {formatDate(myOrder.date)}
+                           <Calendar size={11}/>
+                           {myOrder._isMerged && myOrder.dates && myOrder.dates.length > 1
+                               ? `${myOrder.dates[myOrder.dates.length-1].slice(5)} ~ ${myOrder.dates[0].slice(5)}`
+                               : formatDate(myOrder.date)}
                         </div>
                         
                         {/* 狀態顯示 - 已加入 shipped */}
@@ -546,7 +562,7 @@
                                 </div>
                                 <div className="flex-1 min-w-0">
                                     <div className="font-black text-sm text-[#E07B00]">
-                                        {promotion?.name || '限時優惠'}
+                                        {myOrder.promoName || '限時優惠'}
                                     </div>
                                     <div className="text-[10px] font-bold text-[#E07B00]/70 mt-0.5">
                                         已為您自動套用優惠 🎉
@@ -569,14 +585,14 @@
                             <div className="flex justify-between items-center">
                                 <span className="text-xs font-bold text-[#555555]">運費</span>
                                 <span className={myOrder.hasShippingFee ? 'serif-number text-lg text-[#3A3A3A]' : 'text-xs font-bold text-[#6B7A4A]'}>
-                                    {myOrder.hasShippingFee ? `$${SHIPPING_FEE}` : '已達免運門檻 🎉'}
+                                    {myOrder.hasShippingFee ? `$${myOrder.shippingFeeAmt ?? storeConfig.shippingFee ?? 38}` : '已達免運門檻 🎉'}
                                 </span>
                             </div>
                             {/* ✅ 促銷折扣行 */}
                             {myOrder.promoDiscount > 0 && (
                                 <div className="flex justify-between items-center">
                                     <span className="text-xs font-bold text-[#E07B00] flex items-center gap-1">
-                                        <Tag size={11}/> {promotion?.name || '限時優惠'}
+                                        <Tag size={11}/> {myOrder.promoName || '限時優惠'}
                                     </span>
                                     <span className="serif-number text-lg text-[#E07B00]">-${myOrder.promoDiscount.toLocaleString()}</span>
                                 </div>
